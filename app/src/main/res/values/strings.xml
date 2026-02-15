@@ -1,0 +1,3 @@
+<resources>
+    <!-- app_name is injected by build.gradle.kts via resValue from local.properties -->
+</resources>
