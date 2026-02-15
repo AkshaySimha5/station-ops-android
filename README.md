@@ -13,10 +13,14 @@ An Android application for managing station operations with role-based access co
 
 ## Screenshots
 
-<!-- Add screenshots here -->
-<!-- ![Login](screenshots/login.png) -->
-<!-- ![Dashboard](screenshots/dashboard.png) -->
-<!-- ![Station Detail](screenshots/station_detail.png) -->
+### Login Screen
+![Login screen](docs/screenshots/login.jpeg)
+### Admin Dashboard
+![Admin Dashboard](docs/screenshots/admin.jpeg)
+### Employee Dashboard
+![Employee Dashboard](docs/screenshots/employee.jpeg)
+### Employee Upload
+![Employee Upload](docs/screenshots/emp-upload.jpeg)
 
 ## Architecture
 
@@ -124,6 +128,4 @@ Create the following collections in Cloud Firestore:
 
 Files are stored in Firebase Cloud Storage under paths structured by station. No special rules are required beyond the default authenticated read/write.
 
-## License
 
-This project is available under the [MIT License](LICENSE).
