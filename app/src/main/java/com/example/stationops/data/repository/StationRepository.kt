@@ -24,7 +24,7 @@ class StationRepository {
         } else {
             collection.whereEqualTo("isUploadEnabled", true).get().await()
         }
-        return snapshot.toObjects(Station::class.java)
+        return snapshot.toObjects(Station::class.java).sortedBy { it.name.lowercase() }
     }
 
     suspend fun addStation(name: String, adminId: String) {
@@ -113,11 +113,24 @@ class StationRepository {
     }
 
     suspend fun deleteFile(upload: Upload) {
+        // Delete full media from Storage
         try {
-            val storageRef = storage.getReferenceFromUrl(upload.url)
-            storageRef.delete().await()
+            if (upload.url.isNotEmpty()) {
+                val storageRef = storage.getReferenceFromUrl(upload.url)
+                storageRef.delete().await()
+            }
         } catch (e: Exception) {
             Log.w("StationRepo", "Storage delete failed: ${e.message}")
+        }
+
+        // Delete preview from Storage
+        try {
+            if (upload.previewUrl.isNotEmpty()) {
+                val previewRef = storage.getReferenceFromUrl(upload.previewUrl)
+                previewRef.delete().await()
+            }
+        } catch (e: Exception) {
+            Log.w("StationRepo", "Preview delete failed: ${e.message}")
         }
 
         if (upload.id.isNotEmpty()) {

@@ -6,18 +6,39 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.stationops.data.model.Station
 import com.example.stationops.data.repository.AuthRepository
+import com.example.stationops.data.repository.GroupRepository
 import com.example.stationops.data.repository.StationRepository
 import kotlinx.coroutines.launch
+
+enum class StationFilter(val label: String) {
+    ALL("All Stations"),
+    ACTIVE("Active Only"),
+    LOCKED("Locked Only")
+}
 
 class DashboardViewModel : ViewModel() {
     private val stationRepo = StationRepository()
     private val authRepo = AuthRepository()
+    private val groupRepo = GroupRepository()
 
     var stations = mutableStateOf<List<Station>>(emptyList())
     var isLoading = mutableStateOf(false)
 
     var errorMessage = mutableStateOf<String?>(null)
     var isRefreshing = mutableStateOf(false)
+
+    var stationFilter = mutableStateOf(StationFilter.ALL)
+
+    val filteredStations: List<Station>
+        get() = when (stationFilter.value) {
+            StationFilter.ALL -> stations.value
+            StationFilter.ACTIVE -> stations.value.filter { it.isUploadEnabled }
+            StationFilter.LOCKED -> stations.value.filter { !it.isUploadEnabled }
+        }.sortedBy { it.name.lowercase() }
+
+    fun setFilter(filter: StationFilter) {
+        stationFilter.value = filter
+    }
 
     fun loadStations(isAdmin: Boolean) {
         viewModelScope.launch {
@@ -74,6 +95,7 @@ class DashboardViewModel : ViewModel() {
         viewModelScope.launch {
             try {
                 stationRepo.deleteStation(stationId)
+                groupRepo.removeStationFromAllGroups(stationId)
                 loadStations(true)
             } catch (e: Exception) {
                 errorMessage.value = "Delete failed: ${e.message}"

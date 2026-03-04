@@ -72,6 +72,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import android.os.Build
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import coil.compose.AsyncImage
@@ -93,12 +94,13 @@ fun StationDetailScreen(
     val context = LocalContext.current
     var fileToDelete by remember { mutableStateOf<Upload?>(null) }
     var selectedImageUrl by remember { mutableStateOf<String?>(null) }
+    var pendingDownload by remember { mutableStateOf<Upload?>(null) }
 
     val employeeLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments()
     ) { uris ->
         if (uris.isNotEmpty()) {
-            viewModel.uploadFiles(context, uris, stationId, isAdmin)
+            viewModel.uploadFilesInBackground(context, uris, stationId, isAdmin)
         }
     }
 
@@ -108,7 +110,7 @@ fun StationDetailScreen(
         contract = ActivityResultContracts.TakePicture()
     ) { success ->
         if (success && tempCameraUri != null) {
-            viewModel.uploadFiles(context, listOf(tempCameraUri!!), stationId, isAdmin)
+            viewModel.uploadFilesInBackground(context, listOf(tempCameraUri!!), stationId, isAdmin)
         }
     }
 
@@ -116,7 +118,7 @@ fun StationDetailScreen(
         contract = ActivityResultContracts.CaptureVideo()
     ) { success ->
         if (success && tempCameraUri != null) {
-            viewModel.uploadFiles(context, listOf(tempCameraUri!!), stationId, isAdmin)
+            viewModel.uploadFilesInBackground(context, listOf(tempCameraUri!!), stationId, isAdmin)
         }
     }
 
@@ -134,7 +136,20 @@ fun StationDetailScreen(
         }
     }
 
+    // Request notification permission on Android 13+ so upload progress shows
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { /* upload works regardless; notification just won't appear if denied */ }
+
     LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val hasNotifPermission = ContextCompat.checkSelfPermission(
+                context, Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!hasNotifPermission) {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
         viewModel.loadUploads(stationId, isAdmin)
     }
 
@@ -248,7 +263,14 @@ fun StationDetailScreen(
                                                 isAdmin = isAdmin,
                                                 stationName = stationName,
                                                 onImageClick = { url -> selectedImageUrl = url },
-                                                onDeleteClick = { clickedFile -> fileToDelete = clickedFile }
+                                                onDeleteClick = { clickedFile -> fileToDelete = clickedFile },
+                                                onDownloadClick = { clickedFile ->
+                                                    if (isFileAlreadyDownloaded(clickedFile, stationName)) {
+                                                        pendingDownload = clickedFile
+                                                    } else {
+                                                        downloadFile(context, clickedFile.url, stationName, clickedFile.timestamp, clickedFile.type)
+                                                    }
+                                                }
                                             )
                                         }
                                         if (rowItems.size < 3) {
@@ -333,6 +355,26 @@ fun StationDetailScreen(
                 }
             }
 
+            // Download exists confirmation dialog
+            if (pendingDownload != null) {
+                AlertDialog(
+                    onDismissRequest = { pendingDownload = null },
+                    title = { Text("File Already Downloaded") },
+                    text = { Text("This file already exists locally. Download again?") },
+                    confirmButton = {
+                        Button(onClick = {
+                            pendingDownload?.let { dl ->
+                                downloadFile(context, dl.url, stationName, dl.timestamp, dl.type)
+                            }
+                            pendingDownload = null
+                        }) { Text("Yes") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { pendingDownload = null }) { Text("No") }
+                    }
+                )
+            }
+
             // Delete confirmation dialog
             if (fileToDelete != null) {
                 AlertDialog(
@@ -367,7 +409,8 @@ fun RowScope.FileItemView(
     isAdmin: Boolean,
     stationName: String,
     onImageClick: (String) -> Unit,
-    onDeleteClick: (Upload) -> Unit
+    onDeleteClick: (Upload) -> Unit,
+    onDownloadClick: (Upload) -> Unit = {}
 ) {
     Card(
         modifier = Modifier
@@ -394,28 +437,64 @@ fun RowScope.FileItemView(
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
+            // Resolve the thumbnail URL: prefer previewUrl, fall back to full url
+            val thumbnailUrl = file.previewUrl.ifEmpty { file.url }
+            val isImage = file.type.startsWith("image")
+            val isVideo = file.type.startsWith("video")
+
             when {
-                file.type.startsWith("image") -> {
+                isImage -> {
                     AsyncImage(
-                        model = file.url,
+                        model = if (isAdmin) {
+                            // Admin: never load full media in grid – always preview
+                            file.previewUrl.ifEmpty { file.url }
+                        } else {
+                            // Employee: use preview for fast load, full on tap is unchanged
+                            thumbnailUrl
+                        },
                         contentDescription = null,
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize()
                     )
                 }
-                file.type.startsWith("video") -> {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(Color.DarkGray),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.PlayArrow,
-                            contentDescription = "Video",
-                            tint = Color.White,
-                            modifier = Modifier.size(48.dp)
-                        )
+                isVideo -> {
+                    // Show JPEG preview frame for video (if available), with play overlay
+                    if (thumbnailUrl.isNotEmpty() && thumbnailUrl != file.url) {
+                        // We have a real preview thumbnail
+                        Box(modifier = Modifier.fillMaxSize()) {
+                            AsyncImage(
+                                model = thumbnailUrl,
+                                contentDescription = null,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                            // Play icon overlay
+                            Icon(
+                                imageVector = Icons.Default.PlayArrow,
+                                contentDescription = "Video",
+                                tint = Color.White,
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .align(Alignment.Center)
+                                    .background(Color.Black.copy(alpha = 0.4f), CircleShape)
+                                    .padding(8.dp)
+                            )
+                        }
+                    } else {
+                        // Fallback: plain dark background with play icon (existing behavior)
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(Color.DarkGray),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.PlayArrow,
+                                contentDescription = "Video",
+                                tint = Color.White,
+                                modifier = Modifier.size(48.dp)
+                            )
+                        }
                     }
                 }
                 else -> {
@@ -435,20 +514,22 @@ fun RowScope.FileItemView(
             }
 
             if (isAdmin) {
-                // Download button (top-right)
-                IconButton(
-                    onClick = { downloadFile(context, file.url, stationName, file.timestamp, file.type) },
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .background(Color.Black.copy(alpha = 0.4f), shape = CircleShape)
-                        .size(32.dp)
-                        .padding(4.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Download,
-                        contentDescription = "Download",
-                        tint = Color.White
-                    )
+                // Download button (top-right) – only if upload is complete
+                if (file.uploadStatus == "COMPLETED" && file.url.isNotEmpty()) {
+                    IconButton(
+                        onClick = { onDownloadClick(file) },
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .background(Color.Black.copy(alpha = 0.4f), shape = CircleShape)
+                            .size(32.dp)
+                            .padding(4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Download,
+                            contentDescription = "Download",
+                            tint = Color.White
+                        )
+                    }
                 }
                 // Delete button (bottom-right)
                 IconButton(
@@ -464,6 +545,23 @@ fun RowScope.FileItemView(
                         imageVector = Icons.Default.Delete,
                         contentDescription = "Delete",
                         tint = Color.Red
+                    )
+                }
+            }
+
+            // Upload-in-progress indicator (shown on both sides)
+            if (file.uploadStatus != "COMPLETED") {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(4.dp)
+                        .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                ) {
+                    Text(
+                        text = if (file.uploadStatus == "FAILED") "Failed" else "Uploading…",
+                        color = if (file.uploadStatus == "FAILED") Color(0xFFFF6B6B) else Color.White,
+                        style = MaterialTheme.typography.labelSmall
                     )
                 }
             }
@@ -528,6 +626,21 @@ fun EmptyStateView(
             textAlign = TextAlign.Center
         )
     }
+}
+
+private fun isFileAlreadyDownloaded(upload: Upload, stationName: String): Boolean {
+    val date = upload.timestamp.toDate()
+    val format = SimpleDateFormat("yyyy-MM-dd_HHmmss", Locale.getDefault())
+    val dateString = format.format(date)
+    val safeStationName = stationName.replace(" ", "_")
+    val extension = MimeTypeMap.getSingleton().getExtensionFromMimeType(upload.type) ?: "bin"
+    val finalFileName = "${safeStationName}_${dateString}.$extension"
+    val folderPath = "Work_Photos_Videos/$safeStationName"
+    val file = File(
+        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+        "$folderPath/$finalFileName"
+    )
+    return file.exists()
 }
 
 private fun downloadFile(

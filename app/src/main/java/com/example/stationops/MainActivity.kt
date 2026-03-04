@@ -11,6 +11,8 @@ import androidx.navigation.compose.rememberNavController
 import com.example.stationops.ui.Routes
 import com.example.stationops.ui.dashboard.DashboardScreen
 import com.example.stationops.ui.dashboard.DashboardViewModel
+import com.example.stationops.ui.groups.GroupDetailScreen
+import com.example.stationops.ui.groups.GroupViewModel
 import com.example.stationops.ui.login.LoginScreen
 import com.example.stationops.ui.login.LoginViewModel
 import com.example.stationops.ui.station_detail.StationDetailScreen
@@ -47,11 +49,30 @@ class MainActivity : ComponentActivity() {
                             onStationClick = { stationId, stationName ->
                                 navController.navigate(Routes.details(stationId, role, stationName))
                             },
+                            onGroupClick = { groupId, groupName ->
+                                navController.navigate(Routes.groupDetail(groupId, groupName))
+                            },
                             onLogout = {
                                 navController.navigate(Routes.LOGIN) {
                                     popUpTo(0)
                                 }
                             }
+                        )
+                    }
+
+                    composable(Routes.GROUP_DETAIL) { backStackEntry ->
+                        val groupId = backStackEntry.arguments?.getString("groupId") ?: ""
+                        val groupName = backStackEntry.arguments?.getString("groupName") ?: "Group"
+                        val vm = viewModel<GroupViewModel>()
+
+                        GroupDetailScreen(
+                            viewModel = vm,
+                            groupId = groupId,
+                            groupName = groupName,
+                            onStationClick = { stationId, stationName ->
+                                navController.navigate(Routes.details(stationId, "admin", stationName))
+                            },
+                            onBack = { navController.popBackStack() }
                         )
                     }
 

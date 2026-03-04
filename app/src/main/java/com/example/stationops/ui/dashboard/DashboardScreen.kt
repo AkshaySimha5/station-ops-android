@@ -17,6 +17,7 @@ import androidx.compose.material.icons.automirrored.filled.ExitToApp
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.outlined.Business
 import androidx.compose.material3.AlertDialog
@@ -24,14 +25,19 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LargeTopAppBar
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
@@ -40,15 +46,20 @@ import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.layout.Box
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.stationops.data.model.Station
+import com.example.stationops.ui.groups.GroupListContent
+import com.example.stationops.ui.groups.GroupViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -56,14 +67,24 @@ fun DashboardScreen(
     viewModel: DashboardViewModel,
     isAdmin: Boolean,
     onStationClick: (String, String) -> Unit,
+    onGroupClick: (String, String) -> Unit = { _, _ -> },
     onLogout: () -> Unit
 ) {
     val stations by viewModel.stations
     val isRefreshing by viewModel.isRefreshing
+    val currentFilter by viewModel.stationFilter
 
     var showAddDialog by remember { mutableStateOf(false) }
     var showLogoutDialog by remember { mutableStateOf(false) }
     var stationToDelete by remember { mutableStateOf<Station?>(null) }
+    var showFilterMenu by remember { mutableStateOf(false) }
+
+    // Admin tab state: 0 = Stations, 1 = Groups
+    var selectedTab by remember { mutableIntStateOf(0) }
+    val adminTabs = listOf("Stations", "Groups")
+
+    // Group ViewModel — only used when admin
+    val groupViewModel: GroupViewModel = viewModel()
 
     val pullState = rememberPullToRefreshState()
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
@@ -83,7 +104,32 @@ fun DashboardScreen(
                     )
                 },
                 actions = {
-                    if (isAdmin) {
+                    if (isAdmin && selectedTab == 0) {
+                        Box {
+                            IconButton(onClick = { showFilterMenu = true }) {
+                                Icon(Icons.Default.FilterList, contentDescription = "Filter Stations")
+                            }
+                            DropdownMenu(
+                                expanded = showFilterMenu,
+                                onDismissRequest = { showFilterMenu = false }
+                            ) {
+                                StationFilter.entries.forEach { filter ->
+                                    DropdownMenuItem(
+                                        text = { Text(filter.label) },
+                                        onClick = {
+                                            viewModel.setFilter(filter)
+                                            showFilterMenu = false
+                                        },
+                                        leadingIcon = {
+                                            RadioButton(
+                                                selected = currentFilter == filter,
+                                                onClick = null
+                                            )
+                                        }
+                                    )
+                                }
+                            }
+                        }
                         IconButton(onClick = { showAddDialog = true }) {
                             Icon(Icons.Default.Add, contentDescription = "Add Station")
                         }
@@ -97,100 +143,63 @@ fun DashboardScreen(
         }
     ) { padding ->
 
-        PullToRefreshBox(
-            modifier = Modifier
-                .padding(padding)
-                .fillMaxSize(),
-            isRefreshing = isRefreshing,
-            onRefresh = { viewModel.refreshStations(isAdmin) },
-            state = pullState
-        ) {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                    horizontal = 16.dp,
-                    vertical = 8.dp
-                )
-            ) {
-                items(stations, key = { it.id }) { station ->
-                    Card(
-                        modifier = Modifier
-                            .padding(vertical = 6.dp)
-                            .fillMaxWidth()
-                            .clickable { onStationClick(station.id, station.name) },
-                        shape = RoundedCornerShape(16.dp),
-                        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.surface
+        if (isAdmin) {
+            // Admin view with Stations / Groups tabs
+            Column(modifier = Modifier.padding(padding).fillMaxSize()) {
+                TabRow(selectedTabIndex = selectedTab) {
+                    adminTabs.forEachIndexed { index, title ->
+                        Tab(
+                            selected = selectedTab == index,
+                            onClick = { selectedTab = index },
+                            text = { Text(title) }
                         )
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            // Station icon
-                            Icon(
-                                imageVector = Icons.Outlined.Business,
-                                contentDescription = null,
-                                modifier = Modifier.size(40.dp),
-                                tint = if (station.isUploadEnabled)
-                                    MaterialTheme.colorScheme.primary
-                                else
-                                    MaterialTheme.colorScheme.outline
-                            )
-
-                            Spacer(modifier = Modifier.width(16.dp))
-
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = station.name,
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Medium
-                                )
-                                if (isAdmin) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        modifier = Modifier.padding(top = 4.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = if (station.isUploadEnabled) Icons.Default.CheckCircle else Icons.Default.Lock,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(14.dp),
-                                            tint = if (station.isUploadEnabled)
-                                                MaterialTheme.colorScheme.primary
-                                            else
-                                                MaterialTheme.colorScheme.error
-                                        )
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text(
-                                            text = if (station.isUploadEnabled) "Active" else "Locked",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = if (station.isUploadEnabled)
-                                                MaterialTheme.colorScheme.primary
-                                            else
-                                                MaterialTheme.colorScheme.error
-                                        )
-                                    }
-                                }
-                            }
-
-                            if (isAdmin) {
-                                IconButton(onClick = { stationToDelete = station }) {
-                                    Icon(
-                                        Icons.Default.Delete,
-                                        contentDescription = "Delete Station",
-                                        tint = MaterialTheme.colorScheme.error
-                                    )
-                                }
-
-                                Switch(
-                                    checked = station.isUploadEnabled,
-                                    onCheckedChange = { viewModel.toggleStation(station) }
-                                )
-                            }
-                        }
                     }
                 }
+
+                when (selectedTab) {
+                    0 -> {
+                        // Stations tab — original station list
+                        PullToRefreshBox(
+                            modifier = Modifier.fillMaxSize(),
+                            isRefreshing = isRefreshing,
+                            onRefresh = { viewModel.refreshStations(isAdmin) },
+                            state = pullState
+                        ) {
+                            StationListContent(
+                                stations = viewModel.filteredStations,
+                                isAdmin = true,
+                                onStationClick = onStationClick,
+                                onDeleteStation = { stationToDelete = it },
+                                onToggleStation = { viewModel.toggleStation(it) }
+                            )
+                        }
+                    }
+                    1 -> {
+                        // Groups tab
+                        GroupListContent(
+                            viewModel = groupViewModel,
+                            onGroupClick = onGroupClick
+                        )
+                    }
+                }
+            }
+        } else {
+            // Employee view — unchanged
+            PullToRefreshBox(
+                modifier = Modifier
+                    .padding(padding)
+                    .fillMaxSize(),
+                isRefreshing = isRefreshing,
+                onRefresh = { viewModel.refreshStations(isAdmin) },
+                state = pullState
+            ) {
+                StationListContent(
+                    stations = stations,
+                    isAdmin = false,
+                    onStationClick = onStationClick,
+                    onDeleteStation = {},
+                    onToggleStation = {}
+                )
             }
         }
 
@@ -275,6 +284,106 @@ fun DashboardScreen(
                     }
                 }
             )
+        }
+    }
+}
+
+/**
+ * Extracted station list composable used by both the Stations tab and the employee view.
+ * Keeps the original station card layout intact.
+ */
+@Composable
+private fun StationListContent(
+    stations: List<Station>,
+    isAdmin: Boolean,
+    onStationClick: (String, String) -> Unit,
+    onDeleteStation: (Station) -> Unit,
+    onToggleStation: (Station) -> Unit
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(
+            horizontal = 16.dp,
+            vertical = 8.dp
+        )
+    ) {
+        items(stations, key = { it.id }) { station ->
+            Card(
+                modifier = Modifier
+                    .padding(vertical = 6.dp)
+                    .fillMaxWidth()
+                    .clickable { onStationClick(station.id, station.name) },
+                shape = RoundedCornerShape(16.dp),
+                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                )
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Business,
+                        contentDescription = null,
+                        modifier = Modifier.size(40.dp),
+                        tint = if (station.isUploadEnabled)
+                            MaterialTheme.colorScheme.primary
+                        else
+                            MaterialTheme.colorScheme.outline
+                    )
+
+                    Spacer(modifier = Modifier.width(16.dp))
+
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = station.name,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Medium
+                        )
+                        if (isAdmin) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(top = 4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = if (station.isUploadEnabled) Icons.Default.CheckCircle else Icons.Default.Lock,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(14.dp),
+                                    tint = if (station.isUploadEnabled)
+                                        MaterialTheme.colorScheme.primary
+                                    else
+                                        MaterialTheme.colorScheme.error
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = if (station.isUploadEnabled) "Active" else "Locked",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (station.isUploadEnabled)
+                                        MaterialTheme.colorScheme.primary
+                                    else
+                                        MaterialTheme.colorScheme.error
+                                )
+                            }
+                        }
+                    }
+
+                    if (isAdmin) {
+                        IconButton(onClick = { onDeleteStation(station) }) {
+                            Icon(
+                                Icons.Default.Delete,
+                                contentDescription = "Delete Station",
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                        }
+
+                        Switch(
+                            checked = station.isUploadEnabled,
+                            onCheckedChange = { onToggleStation(station) }
+                        )
+                    }
+                }
+            }
         }
     }
 }
