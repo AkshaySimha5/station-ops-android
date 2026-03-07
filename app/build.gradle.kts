@@ -21,6 +21,23 @@ android {
     namespace = "com.example.stationops"
     compileSdk = 36
 
+    // Use the debug signing key for release builds so that the same SHA-1
+    // fingerprint registered in Firebase is used regardless of build type.
+    signingConfigs {
+        getByName("debug") {
+            // Uses the default debug keystore at ~/.android/debug.keystore
+        }
+        create("release") {
+            // TODO: Replace with your production keystore and register its
+            //       SHA-1 / SHA-256 in the Firebase Console.
+            //       For now, reuse the debug keystore so APK installs work.
+            storeFile = file("${System.getProperty("user.home")}/.android/debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     defaultConfig {
         applicationId = localAppId
         minSdk = 24
@@ -37,6 +54,7 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

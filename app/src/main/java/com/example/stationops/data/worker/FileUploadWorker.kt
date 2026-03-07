@@ -13,6 +13,7 @@ import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
 import com.example.stationops.data.util.PreviewGenerator
 import com.google.firebase.Timestamp
+import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.storage.FirebaseStorage
 import kotlinx.coroutines.tasks.await
@@ -46,6 +47,26 @@ class FileUploadWorker(
         val isAdmin = inputData.getBoolean(KEY_IS_ADMIN, false)
 
         createNotificationChannel()
+
+        // ── Verify Firebase Auth state & force-refresh token ────────────
+        val auth = FirebaseAuth.getInstance()
+        val currentUser = auth.currentUser
+        if (currentUser == null) {
+            Log.e("FileUploadWorker", "No authenticated user – cannot upload")
+            showFailureNotification("Not signed in. Please log in and try again.")
+            cleanupTempFiles(filePaths)
+            return Result.failure()
+        }
+        try {
+            // Force-refresh the ID token so Firebase Storage accepts it
+            currentUser.getIdToken(true).await()
+            Log.d("FileUploadWorker", "Auth token refreshed for uid=${currentUser.uid}")
+        } catch (e: Exception) {
+            Log.e("FileUploadWorker", "Token refresh failed: ${e.message}", e)
+            showFailureNotification("Authentication expired. Please log in again.")
+            cleanupTempFiles(filePaths)
+            return Result.failure()
+        }
 
         val storage = FirebaseStorage.getInstance()
         val db = FirebaseFirestore.getInstance()
