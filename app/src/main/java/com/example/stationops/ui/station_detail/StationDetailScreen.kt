@@ -81,6 +81,7 @@ import com.google.firebase.Timestamp
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Locale
+import com.google.firebase.storage.FirebaseStorage
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -650,29 +651,53 @@ private fun downloadFile(
     timestamp: Timestamp,
     mimeType: String
 ) {
+    fun enqueueWithMime(resolvedMime: String) {
+        try {
+            val date = timestamp.toDate()
+            val format = SimpleDateFormat("yyyy-MM-dd_HHmmss", Locale.getDefault())
+            val dateString = format.format(date)
+            val safeStationName = stationName.replace(" ", "_")
+            val extension = MimeTypeMap.getSingleton().getExtensionFromMimeType(resolvedMime) ?: "bin"
+            val finalFileName = "${safeStationName}_${dateString}.$extension"
+            val folderPath = "Work_Photos_Videos/$safeStationName"
+
+            val request = DownloadManager.Request(Uri.parse(url))
+                .setTitle(finalFileName)
+                .setDescription("Downloading file from Station Ops...")
+                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "$folderPath/$finalFileName")
+                .setAllowedOverMetered(true)
+                .setAllowedOverRoaming(true)
+
+            val manager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+            manager.enqueue(request)
+
+            Toast.makeText(context, "Downloading $finalFileName", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Toast.makeText(context, "Download Failed: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    // If the stored mimeType looks like a full MIME (contains '/'), use it.
+    if (mimeType.contains("/")) {
+        enqueueWithMime(mimeType)
+        return
+    }
+
+    // Otherwise try to fetch the content type from Firebase Storage metadata.
     try {
-        val date = timestamp.toDate()
-        val format = SimpleDateFormat("yyyy-MM-dd_HHmmss", Locale.getDefault())
-        val dateString = format.format(date)
-        val safeStationName = stationName.replace(" ", "_")
-        val extension = MimeTypeMap.getSingleton().getExtensionFromMimeType(mimeType) ?: "bin"
-        val finalFileName = "${safeStationName}_${dateString}.$extension"
-        val folderPath = "Work_Photos_Videos/$safeStationName"
-
-        val request = DownloadManager.Request(Uri.parse(url))
-            .setTitle(finalFileName)
-            .setDescription("Downloading file from Station Ops...")
-            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-            .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "$folderPath/$finalFileName")
-            .setAllowedOverMetered(true)
-            .setAllowedOverRoaming(true)
-
-        val manager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-        manager.enqueue(request)
-
-        Toast.makeText(context, "Downloading $finalFileName", Toast.LENGTH_SHORT).show()
+        val storage = FirebaseStorage.getInstance()
+        val ref = storage.getReferenceFromUrl(url)
+        ref.metadata.addOnSuccessListener { metadata ->
+            val ct = metadata.contentType ?: mimeType
+            enqueueWithMime(ct)
+        }.addOnFailureListener {
+            // Fallback to the provided mimeType (will likely become .bin)
+            enqueueWithMime(mimeType)
+        }
     } catch (e: Exception) {
-        Toast.makeText(context, "Download Failed: ${e.message}", Toast.LENGTH_LONG).show()
+        // If anything goes wrong, fall back to provided mimeType
+        enqueueWithMime(mimeType)
     }
 }
 

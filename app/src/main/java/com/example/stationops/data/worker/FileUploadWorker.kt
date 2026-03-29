@@ -100,16 +100,11 @@ class FileUploadWorker(
                 }
 
                 // ── 3. Save Firestore doc with preview URL + PENDING status ─
-                val mediaType = when {
-                    mimeType.startsWith("image") -> "image"
-                    mimeType.startsWith("video") -> "video"
-                    else -> mimeType
-                }
-
+                // Store the full MIME type so downloads can derive extensions reliably.
                 val docData = hashMapOf(
                     "url" to "",                 // will be filled after full upload
                     "previewUrl" to previewUrl,
-                    "type" to mediaType,
+                    "type" to mimeType,
                     "uploadStatus" to "UPLOADING",
                     "uploaderId" to userId,
                     "stationId" to stationId,
