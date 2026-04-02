@@ -4,6 +4,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
 import android.content.pm.ServiceInfo
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.util.Log
@@ -11,14 +12,23 @@ import androidx.core.app.NotificationCompat
 import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
+import com.abedelazizshe.lightcompressorlibrary.CompressionListener
+import com.abedelazizshe.lightcompressorlibrary.VideoCompressor
+import com.abedelazizshe.lightcompressorlibrary.VideoQuality
+import com.abedelazizshe.lightcompressorlibrary.config.AppSpecificStorageConfiguration
+import com.abedelazizshe.lightcompressorlibrary.config.Configuration
 import com.example.stationops.data.util.PreviewGenerator
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.storage.FirebaseStorage
+import com.google.firebase.storage.StorageMetadata
 import kotlinx.coroutines.tasks.await
 import java.io.File
 import java.util.UUID
+import kotlin.coroutines.resume
+import kotlin.math.roundToInt
+import kotlinx.coroutines.suspendCancellableCoroutine
 
 class FileUploadWorker(
     context: Context,
@@ -71,6 +81,8 @@ class FileUploadWorker(
         val storage = FirebaseStorage.getInstance()
         val db = FirebaseFirestore.getInstance()
         val totalFiles = filePaths.size
+        val createdDocIds = mutableListOf<String>()  // Track created docs for failure handling
+        val tempGeneratedFiles = mutableListOf<String>()
 
         return try {
             setForeground(createForegroundInfo("Preparing upload…", 0, totalFiles * 100))
@@ -79,10 +91,32 @@ class FileUploadWorker(
                 val sourceFile = File(path)
                 val mimeType = mimeTypes.getOrElse(index) { "application/octet-stream" }
                 val mediaUUID = UUID.randomUUID().toString()
+                val isVideo = isVideoFile(sourceFile, mimeType)
+
+                val uploadFile = if (isVideo) {
+                    val result = compressVideoIfNeeded(sourceFile, mediaUUID, index, totalFiles)
+                    if (result != null && result.absolutePath != sourceFile.absolutePath) {
+                        tempGeneratedFiles.add(result.absolutePath)
+                    }
+                    result ?: sourceFile
+                } else {
+                    sourceFile
+                }
+                Log.i(
+                    "FileUploadWorker",
+                    "Upload candidate selected for file ${index + 1}/$totalFiles. source=${sourceFile.length()} bytes, upload=${uploadFile.length()} bytes, path=${uploadFile.absolutePath}"
+                )
+                val uploadMimeType = if (isVideo && uploadFile.absolutePath != sourceFile.absolutePath) {
+                    "video/mp4"
+                } else if (isVideo) {
+                    normalizeVideoMimeType(mimeType)
+                } else {
+                    mimeType
+                }
 
                 // ── 1. Generate preview locally ─────────────────────────────
                 val previewFile = PreviewGenerator.generatePreview(
-                    applicationContext, sourceFile, mimeType
+                    applicationContext, uploadFile, uploadMimeType
                 )
 
                 // ── 2. Upload preview immediately ───────────────────────────
@@ -99,18 +133,19 @@ class FileUploadWorker(
                     previewFile.delete()
                 }
 
-                // ── 3. Save Firestore doc with preview URL + PENDING status ─
-                // Store the full MIME type so downloads can derive extensions reliably.
+                // ── 3. Save Firestore doc with preview URL + UPLOADING status ─
                 val docData = hashMapOf(
                     "url" to "",                 // will be filled after full upload
                     "previewUrl" to previewUrl,
-                    "type" to mimeType,
+                    "type" to uploadMimeType,
                     "uploadStatus" to "UPLOADING",
                     "uploaderId" to userId,
                     "stationId" to stationId,
-                    "timestamp" to Timestamp.now()
+                    "timestamp" to Timestamp.now(),
+                    "failedAt" to null
                 )
                 val docRef = db.collection("uploads").add(docData).await()
+                createdDocIds.add(docRef.id)
 
                 // ── 4. Upload full media in background ──────────────────────
                 val storagePath = if (isAdmin) {
@@ -120,7 +155,10 @@ class FileUploadWorker(
                 }
 
                 val storageRef = storage.reference.child(storagePath)
-                val uploadTask = storageRef.putFile(Uri.fromFile(sourceFile))
+                val metadata = StorageMetadata.Builder()
+                    .setContentType(uploadMimeType)
+                    .build()
+                val uploadTask = storageRef.putFile(Uri.fromFile(uploadFile), metadata)
 
                 uploadTask.addOnProgressListener { snapshot ->
                     if (snapshot.totalByteCount > 0) {
@@ -148,20 +186,236 @@ class FileUploadWorker(
             }
 
             showCompletionNotification(totalFiles)
+            cleanupTempFiles(tempGeneratedFiles.toTypedArray())
             cleanupTempFiles(filePaths)
             Result.success()
         } catch (e: Exception) {
             Log.e("FileUploadWorker", "Upload failed: ${e.message}", e)
 
-            // Mark any in-flight docs as FAILED (best-effort)
-            try {
-                // We can't easily track which docs were created, so we just log
-                Log.w("FileUploadWorker", "Some uploads may be left in UPLOADING state")
-            } catch (_: Exception) {}
+            // Mark all created docs as FAILED
+            Log.w("FileUploadWorker", "Marking ${createdDocIds.size} docs as FAILED")
+            markDocumentsAsFailed(db, createdDocIds)
 
             showFailureNotification(e.message ?: "Unknown error")
+            cleanupTempFiles(tempGeneratedFiles.toTypedArray())
             cleanupTempFiles(filePaths)
             Result.failure()
+        }
+    }
+
+    private suspend fun compressVideoIfNeeded(
+        sourceFile: File,
+        mediaUUID: String,
+        fileIndex: Int,
+        totalFiles: Int
+    ): File? {
+        val sourceSizeMb = sourceFile.length() / (1024f * 1024f)
+        if (sourceSizeMb <= 30f) {
+            return sourceFile
+        }
+
+        val outputName = "compressed_$mediaUUID.mp4"
+        val compressionOutputDir = File(applicationContext.filesDir, "compressed_uploads")
+        if (!compressionOutputDir.exists()) {
+            compressionOutputDir.mkdirs()
+        }
+        Log.i(
+            "FileUploadWorker",
+            "Compression output dir: ${compressionOutputDir.absolutePath}, writable=${compressionOutputDir.canWrite()}"
+        )
+
+        val firstQuality = when {
+            sourceSizeMb >= 100f -> VideoQuality.LOW
+            sourceSizeMb >= 70f -> VideoQuality.MEDIUM
+            else -> VideoQuality.MEDIUM
+        }
+
+        val firstAttempt = compressVideoOnce(
+            sourceFile = sourceFile,
+            outputName = outputName,
+            quality = firstQuality,
+            fileIndex = fileIndex,
+            totalFiles = totalFiles
+        )
+
+        if (firstAttempt != null && firstAttempt.exists() && firstAttempt.length() in 1 until sourceFile.length()) {
+            return firstAttempt
+        }
+
+        Log.w(
+            "FileUploadWorker",
+            "First compression pass did not reduce size (source=${sourceFile.length()}, compressed=${firstAttempt?.length() ?: -1}). Retrying with VERY_LOW."
+        )
+
+        val secondAttempt = compressVideoOnce(
+            sourceFile = sourceFile,
+            outputName = "compressed_retry_$mediaUUID.mp4",
+            quality = VideoQuality.VERY_LOW,
+            fileIndex = fileIndex,
+            totalFiles = totalFiles
+        )
+
+        val bestCompressed = listOfNotNull(firstAttempt, secondAttempt)
+            .filter { it.exists() && it.length() > 0L }
+            .minByOrNull { it.length() }
+
+        if (bestCompressed == null) {
+            Log.w("FileUploadWorker", "Compression failed in all passes. Uploading original.")
+            return sourceFile
+        }
+
+        if (bestCompressed.length() >= sourceFile.length()) {
+            Log.w(
+                "FileUploadWorker",
+                "Compression completed but file is not smaller (source=${sourceFile.length()}, best=${bestCompressed.length()}). Uploading compressed anyway for verification."
+            )
+        }
+
+        return bestCompressed
+    }
+
+    private suspend fun compressVideoOnce(
+        sourceFile: File,
+        outputName: String,
+        quality: VideoQuality,
+        fileIndex: Int,
+        totalFiles: Int
+    ): File? {
+        val expectedOutputFile = File(applicationContext.filesDir, "compressed_uploads/$outputName")
+        Log.i(
+            "FileUploadWorker",
+            "Compression expected output: ${expectedOutputFile.absolutePath}, exists=${expectedOutputFile.exists()}, size=${expectedOutputFile.length()}"
+        )
+
+        return suspendCancellableCoroutine { continuation ->
+            var completed = false
+
+            fun completeOnce(file: File?) {
+                if (completed) return
+                completed = true
+                continuation.resume(file)
+            }
+
+            VideoCompressor.start(
+                context = applicationContext,
+                uris = listOf(Uri.fromFile(sourceFile)),
+                isStreamable = true,
+                storageConfiguration = AppSpecificStorageConfiguration("compressed_uploads"),
+                configureWith = Configuration(
+                    quality = quality,
+                    isMinBitrateCheckEnabled = false,
+                    disableAudio = false,
+                    resizer = null,
+                    videoNames = listOf(outputName)
+                ),
+                listener = object : CompressionListener {
+                    override fun onStart(index: Int) {
+                        updateProgressNotification(
+                            "Compressing video ${fileIndex + 1} of $totalFiles...",
+                            fileIndex * 100,
+                            totalFiles * 100
+                        )
+                    }
+
+                    override fun onProgress(index: Int, percent: Float) {
+                        val overallProgress = fileIndex * 100 + percent.roundToInt().coerceIn(0, 100)
+                        updateProgressNotification(
+                            "Compressing video ${fileIndex + 1} of $totalFiles (${percent.toInt()}%)",
+                            overallProgress,
+                            totalFiles * 100
+                        )
+                    }
+
+                    override fun onSuccess(index: Int, size: Long, path: String?) {
+                        val callbackFile = path?.let(::File)
+                        val compressedFile = when {
+                            callbackFile != null && callbackFile.exists() && callbackFile.length() > 0L -> callbackFile
+                            expectedOutputFile.exists() && expectedOutputFile.length() > 0L -> expectedOutputFile
+                            else -> null
+                        }
+
+                        if (compressedFile == null) {
+                            Log.w(
+                                "FileUploadWorker",
+                                "Compression returned invalid path and expected output missing/empty. callbackPath=$path"
+                            )
+                            completeOnce(null)
+                            return
+                        }
+                        if (compressedFile.absolutePath == sourceFile.absolutePath) {
+                            Log.w("FileUploadWorker", "Compressed output path is same as source path: ${compressedFile.absolutePath}")
+                        }
+                        if (compressedFile.length() >= sourceFile.length()) {
+                            Log.w(
+                                "FileUploadWorker",
+                                "Compressed file is not smaller (source=${sourceFile.length()}, compressed=${compressedFile.length()}). Uploading compressed anyway for verification."
+                            )
+                        }
+                        Log.i(
+                            "FileUploadWorker",
+                            "Compression ratio: ${compressedFile.length().toFloat() / sourceFile.length().coerceAtLeast(1L)}"
+                        )
+                        Log.i(
+                            "FileUploadWorker",
+                            "Video compressed from ${sourceFile.length()} to ${compressedFile.length()} bytes using quality=$quality"
+                        )
+                        completeOnce(compressedFile)
+                    }
+
+                    override fun onFailure(index: Int, failureMessage: String) {
+                        Log.w("FileUploadWorker", "Compression failed: $failureMessage. Uploading original.")
+                        completeOnce(null)
+                    }
+
+                    override fun onCancelled(index: Int) {
+                        Log.w("FileUploadWorker", "Compression cancelled. Uploading original.")
+                        completeOnce(null)
+                    }
+                }
+            )
+
+            continuation.invokeOnCancellation {
+                try {
+                    VideoCompressor.cancel()
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
+    private fun isVideoFile(file: File, mimeType: String): Boolean {
+        if (mimeType.startsWith("video")) return true
+        val extension = file.extension.lowercase()
+        if (extension in setOf("mp4", "mov", "m4v", "3gp", "webm", "mkv")) return true
+
+        return try {
+            val retriever = MediaMetadataRetriever()
+            retriever.setDataSource(file.absolutePath)
+            val hasVideo = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO)
+            retriever.release()
+            hasVideo == "yes"
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun normalizeVideoMimeType(mimeType: String): String {
+        return if (mimeType.startsWith("video")) mimeType else "video/mp4"
+    }
+
+    private suspend fun markDocumentsAsFailed(db: FirebaseFirestore, docIds: List<String>) {
+        docIds.forEach { docId ->
+            try {
+                db.collection("uploads").document(docId).update(
+                    mapOf(
+                        "uploadStatus" to "FAILED",
+                        "failedAt" to Timestamp.now()
+                    )
+                ).await()
+                Log.i("FileUploadWorker", "Marked doc $docId as FAILED")
+            } catch (e: Exception) {
+                Log.e("FileUploadWorker", "Failed to mark doc $docId as FAILED: ${e.message}", e)
+            }
         }
     }
 

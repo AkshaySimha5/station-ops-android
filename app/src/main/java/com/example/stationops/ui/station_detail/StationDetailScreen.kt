@@ -550,7 +550,7 @@ fun RowScope.FileItemView(
                 }
             }
 
-            // Upload-in-progress indicator (shown on both sides)
+            // Upload-in-progress or failed indicator (shown on both sides)
             if (file.uploadStatus != "COMPLETED") {
                 Box(
                     modifier = Modifier

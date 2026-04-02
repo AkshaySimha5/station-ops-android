@@ -10,5 +10,6 @@ data class Upload(
     val uploadStatus: String = "COMPLETED",
     val uploaderId: String = "",
     val stationId: String = "",
-    val timestamp: Timestamp = Timestamp.now()
+    val timestamp: Timestamp = Timestamp.now(),
+    val failedAt: Timestamp? = null  
 )
