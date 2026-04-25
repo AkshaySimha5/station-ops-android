@@ -151,7 +151,7 @@ fun StationDetailScreen(
                 notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
             }
         }
-        viewModel.loadUploads(stationId, isAdmin)
+        viewModel.loadUploads(stationId)
     }
 
     Scaffold(

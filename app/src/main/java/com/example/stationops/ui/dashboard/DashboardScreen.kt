@@ -70,20 +70,18 @@ fun DashboardScreen(
     onGroupClick: (String, String) -> Unit = { _, _ -> },
     onLogout: () -> Unit
 ) {
-    val stations by viewModel.stations
     val isRefreshing by viewModel.isRefreshing
     val currentFilter by viewModel.stationFilter
+    val searchQuery by viewModel.searchQuery             // ← new
 
     var showAddDialog by remember { mutableStateOf(false) }
     var showLogoutDialog by remember { mutableStateOf(false) }
     var stationToDelete by remember { mutableStateOf<Station?>(null) }
     var showFilterMenu by remember { mutableStateOf(false) }
 
-    // Admin tab state: 0 = Stations, 1 = Groups
     var selectedTab by remember { mutableIntStateOf(0) }
     val adminTabs = listOf("Stations", "Groups")
 
-    // Group ViewModel — only used when admin
     val groupViewModel: GroupViewModel = viewModel()
 
     val pullState = rememberPullToRefreshState()
@@ -144,7 +142,6 @@ fun DashboardScreen(
     ) { padding ->
 
         if (isAdmin) {
-            // Admin view with Stations / Groups tabs
             Column(modifier = Modifier.padding(padding).fillMaxSize()) {
                 TabRow(selectedTabIndex = selectedTab) {
                     adminTabs.forEachIndexed { index, title ->
@@ -158,7 +155,12 @@ fun DashboardScreen(
 
                 when (selectedTab) {
                     0 -> {
-                        // Stations tab — original station list
+                        // ── Search bar (Stations tab only) ────────────────
+                        StationSearchBar(
+                            query = searchQuery,
+                            onQueryChange = { viewModel.setSearchQuery(it) }
+                        )
+                        // ─────────────────────────────────────────────────
                         PullToRefreshBox(
                             modifier = Modifier.fillMaxSize(),
                             isRefreshing = isRefreshing,
@@ -175,7 +177,6 @@ fun DashboardScreen(
                         }
                     }
                     1 -> {
-                        // Groups tab
                         GroupListContent(
                             viewModel = groupViewModel,
                             onGroupClick = onGroupClick
@@ -184,26 +185,38 @@ fun DashboardScreen(
                 }
             }
         } else {
-            // Employee view — unchanged
-            PullToRefreshBox(
+            // Employee view
+            Column(
                 modifier = Modifier
                     .padding(padding)
-                    .fillMaxSize(),
-                isRefreshing = isRefreshing,
-                onRefresh = { viewModel.refreshStations(isAdmin) },
-                state = pullState
+                    .fillMaxSize()
             ) {
-                StationListContent(
-                    stations = stations,
-                    isAdmin = false,
-                    onStationClick = onStationClick,
-                    onDeleteStation = {},
-                    onToggleStation = {}
+                // ── Search bar ────────────────────────────────────────────
+                StationSearchBar(
+                    query = searchQuery,
+                    onQueryChange = { viewModel.setSearchQuery(it) }
                 )
+                // ─────────────────────────────────────────────────────────
+                PullToRefreshBox(
+                    modifier = Modifier.fillMaxSize(),
+                    isRefreshing = isRefreshing,
+                    onRefresh = { viewModel.refreshStations(isAdmin) },
+                    state = pullState
+                ) {
+                    // filteredStations: StationFilter.ALL passes all through;
+                    // only the search query is applied for employees.
+                    StationListContent(
+                        stations = viewModel.filteredStations,
+                        isAdmin = false,
+                        onStationClick = onStationClick,
+                        onDeleteStation = {},
+                        onToggleStation = {}
+                    )
+                }
             }
         }
 
-        // Add Station Dialog
+        // ── Add Station Dialog ─────────────────────────────────────────────
         if (showAddDialog) {
             var newName by remember { mutableStateOf("") }
             AlertDialog(
@@ -236,7 +249,7 @@ fun DashboardScreen(
             )
         }
 
-        // Logout Dialog
+        // ── Logout Dialog ──────────────────────────────────────────────────
         if (showLogoutDialog) {
             AlertDialog(
                 onDismissRequest = { showLogoutDialog = false },
@@ -255,7 +268,7 @@ fun DashboardScreen(
             )
         }
 
-        // Delete Confirmation Dialog
+        // ── Delete Confirmation Dialog ─────────────────────────────────────
         if (stationToDelete != null) {
             AlertDialog(
                 onDismissRequest = { stationToDelete = null },
@@ -289,8 +302,8 @@ fun DashboardScreen(
 }
 
 /**
- * Extracted station list composable used by both the Stations tab and the employee view.
- * Keeps the original station card layout intact.
+ * Extracted station list composable used by both the Stations tab and the
+ * employee view.  Keeps the original station card layout intact.
  */
 @Composable
 private fun StationListContent(
@@ -347,7 +360,10 @@ private fun StationListContent(
                                 modifier = Modifier.padding(top = 4.dp)
                             ) {
                                 Icon(
-                                    imageVector = if (station.isUploadEnabled) Icons.Default.CheckCircle else Icons.Default.Lock,
+                                    imageVector = if (station.isUploadEnabled)
+                                        Icons.Default.CheckCircle
+                                    else
+                                        Icons.Default.Lock,
                                     contentDescription = null,
                                     modifier = Modifier.size(14.dp),
                                     tint = if (station.isUploadEnabled)
@@ -376,7 +392,6 @@ private fun StationListContent(
                                 tint = MaterialTheme.colorScheme.error
                             )
                         }
-
                         Switch(
                             checked = station.isUploadEnabled,
                             onCheckedChange = { onToggleStation(station) }

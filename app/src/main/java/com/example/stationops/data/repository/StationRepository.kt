@@ -80,31 +80,16 @@ class StationRepository {
         db.collection("uploads").add(upload).await()
     }
 
-    suspend fun getUploads(stationId: String, isAdmin: Boolean, userId: String): List<Upload> {
-        var query = db.collection("uploads")
+    suspend fun getUploads(stationId: String): List<Upload> {
+        var snapshot = db.collection("uploads")
             .whereEqualTo("stationId", stationId)
             .orderBy("timestamp", Query.Direction.DESCENDING)
-
-        if (!isAdmin) {
-            query = query.whereEqualTo("uploaderId", userId)
-            val startOfDay = getStartOfDay()
-            query = query.whereGreaterThanOrEqualTo("timestamp", startOfDay)
-        }
-        val snapshot = query.get().await()
-
+            .get()
+            .await()
         return snapshot.documents.mapNotNull { doc ->
             val upload = doc.toObject(Upload::class.java)
             upload?.copy(id = doc.id)
         }
-    }
-
-    private fun getStartOfDay(): Date {
-        val calendar = Calendar.getInstance()
-        calendar.set(Calendar.HOUR_OF_DAY, 0)
-        calendar.set(Calendar.MINUTE, 0)
-        calendar.set(Calendar.SECOND, 0)
-        calendar.set(Calendar.MILLISECOND, 0)
-        return calendar.time
     }
 
     suspend fun getStationName(stationId: String): String {

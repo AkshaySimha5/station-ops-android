@@ -23,18 +23,35 @@ class DashboardViewModel : ViewModel() {
 
     var stations = mutableStateOf<List<Station>>(emptyList())
     var isLoading = mutableStateOf(false)
-
     var errorMessage = mutableStateOf<String?>(null)
     var isRefreshing = mutableStateOf(false)
 
     var stationFilter = mutableStateOf(StationFilter.ALL)
 
+    // ── Search ────────────────────────────────────────────────────────────
+    var searchQuery = mutableStateOf("")
+
+    fun setSearchQuery(query: String) {
+        searchQuery.value = query
+    }
+    // ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * Applies status filter → search filter → alphabetical sort.
+     *
+     * All three steps operate on the already-loaded in-memory list, so
+     * no extra network calls are made when the query or filter changes.
+     */
     val filteredStations: List<Station>
-        get() = when (stationFilter.value) {
-            StationFilter.ALL -> stations.value
-            StationFilter.ACTIVE -> stations.value.filter { it.isUploadEnabled }
-            StationFilter.LOCKED -> stations.value.filter { !it.isUploadEnabled }
-        }.sortedBy { it.name.lowercase() }
+        get() {
+            val statusFiltered = when (stationFilter.value) {
+                StationFilter.ALL -> stations.value
+                StationFilter.ACTIVE -> stations.value.filter { it.isUploadEnabled }
+                StationFilter.LOCKED -> stations.value.filter { !it.isUploadEnabled }
+            }
+            return filterStationsByQuery(statusFiltered, searchQuery.value)
+                .sortedBy { it.name.lowercase() }
+        }
 
     fun setFilter(filter: StationFilter) {
         stationFilter.value = filter

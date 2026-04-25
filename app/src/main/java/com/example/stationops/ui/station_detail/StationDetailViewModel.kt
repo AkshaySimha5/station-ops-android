@@ -34,12 +34,12 @@ class StationDetailViewModel : ViewModel() {
     var uploadProgress = mutableStateOf(0f)
     var uploadStatusText = mutableStateOf("")
 
-    fun loadUploads(stationId: String, isAdmin: Boolean) {
+    fun loadUploads(stationId: String) {
         val userId = authRepo.getCurrentUserId() ?: return
         viewModelScope.launch {
             isLoading.value = true
             try {
-                val rawList = stationRepo.getUploads(stationId, isAdmin, userId)
+                val rawList = stationRepo.getUploads(stationId)
                 val grouped = rawList.groupBy { upload ->
                     val date = upload.timestamp.toDate()
                     SimpleDateFormat("dd MMM yyyy", Locale.getDefault()).format(date)
@@ -79,7 +79,7 @@ class StationDetailViewModel : ViewModel() {
                 }
 
                 Toast.makeText(context, "All files uploaded!", Toast.LENGTH_SHORT).show()
-                loadUploads(stationId, isAdmin)
+                loadUploads(stationId)
             } catch (e: Exception) {
                 Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_LONG).show()
             } finally {
@@ -145,7 +145,7 @@ class StationDetailViewModel : ViewModel() {
                     workManager.getWorkInfoByIdFlow(uploadRequest.id)
                         .filter { it?.state?.isFinished == true }
                         .first()
-                    loadUploads(stationId, isAdmin)
+                    loadUploads(stationId)
                 }
             } catch (e: Exception) {
                 Toast.makeText(context, "Error starting upload: ${e.message}", Toast.LENGTH_LONG).show()
@@ -158,7 +158,7 @@ class StationDetailViewModel : ViewModel() {
             isLoading.value = true
             try {
                 stationRepo.deleteFile(upload)
-                loadUploads(stationId, isAdmin)
+                loadUploads(stationId)
             } catch (e: Exception) {
                 Log.e("StationDetailVM", "Delete failed: ${e.message}")
             } finally {
