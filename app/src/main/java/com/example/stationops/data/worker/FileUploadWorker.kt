@@ -21,10 +21,13 @@ import com.example.stationops.data.util.PreviewGenerator
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.FirebaseFirestoreException
 import com.google.firebase.storage.FirebaseStorage
+import com.google.firebase.storage.StorageException
 import com.google.firebase.storage.StorageMetadata
 import kotlinx.coroutines.tasks.await
 import java.io.File
+import java.io.IOException
 import java.util.UUID
 import kotlin.coroutines.resume
 import kotlin.math.roundToInt
@@ -37,12 +40,24 @@ class FileUploadWorker(
 
     companion object {
         const val CHANNEL_ID = "upload_channel"
-        const val NOTIFICATION_ID = 1001
         const val KEY_FILE_PATHS = "file_paths"
         const val KEY_MIME_TYPES = "mime_types"
         const val KEY_STATION_ID = "station_id"
         const val KEY_USER_ID = "user_id"
         const val KEY_IS_ADMIN = "is_admin"
+        const val MAX_RETRY_ATTEMPTS = 3
+    }
+
+    // Derive a unique notification ID from the stationId so that concurrent workers
+    // for different stations each own a separate notification slot and cannot stomp
+    // on each other's progress, completion, or failure notifications.
+    // .and(0x7FFFFFFF) strips the sign bit so the result is always a positive Int,
+    // which is required by NotificationManager.
+    // Offsets:  +0 = progress (ongoing), +1 = completion, +2 = failure
+    private val notificationId: Int by lazy {
+        (inputData.getString(KEY_STATION_ID) ?: "default")
+            .hashCode()
+            .and(0x7FFFFFFF)
     }
 
     private val notificationManager by lazy {
@@ -75,13 +90,18 @@ class FileUploadWorker(
             Log.e("FileUploadWorker", "Token refresh failed: ${e.message}", e)
             showFailureNotification("Authentication expired. Please log in again.")
             cleanupTempFiles(filePaths)
+            // Auth failures are permanent – do not retry
             return Result.failure()
         }
 
         val storage = FirebaseStorage.getInstance()
         val db = FirebaseFirestore.getInstance()
         val totalFiles = filePaths.size
-        val createdDocIds = mutableListOf<String>()  // Track created docs for failure handling
+
+        // FIX 1: Renamed from createdDocIds → pendingDocIds.
+        // IDs are removed from this list as soon as each doc reaches COMPLETED,
+        // so the failure handler never overwrites already-finished uploads.
+        val pendingDocIds = mutableListOf<String>()
         val tempGeneratedFiles = mutableListOf<String>()
 
         return try {
@@ -91,6 +111,25 @@ class FileUploadWorker(
                 val sourceFile = File(path)
                 val mimeType = mimeTypes.getOrElse(index) { "application/octet-stream" }
                 val mediaUUID = UUID.randomUUID().toString()
+
+                // BUG 2 FIX: Validate the temp file before touching anything else.
+                // The file can be missing (OS evicted cache under storage pressure) or
+                // zero-byte (openInputStream returned null during copy in the ViewModel).
+                // Catching this here — before the Firestore doc is created — means there
+                // is no orphaned UPLOADING record to clean up; the failure is clean.
+                if (!sourceFile.exists()) {
+                    throw IOException(
+                        "Temp file missing for file ${index + 1}/$totalFiles — " +
+                            "likely evicted from cache before worker ran. path=$path"
+                    )
+                }
+                if (sourceFile.length() == 0L) {
+                    throw IOException(
+                        "Temp file is zero bytes for file ${index + 1}/$totalFiles — " +
+                            "content URI stream was null or empty during copy. path=$path"
+                    )
+                }
+
                 val isVideo = isVideoFile(sourceFile, mimeType)
 
                 val uploadFile = if (isVideo) {
@@ -104,8 +143,11 @@ class FileUploadWorker(
                 }
                 Log.i(
                     "FileUploadWorker",
-                    "Upload candidate selected for file ${index + 1}/$totalFiles. source=${sourceFile.length()} bytes, upload=${uploadFile.length()} bytes, path=${uploadFile.absolutePath}"
+                    "Upload candidate selected for file ${index + 1}/$totalFiles. " +
+                        "source=${sourceFile.length()} bytes, upload=${uploadFile.length()} bytes, " +
+                        "path=${uploadFile.absolutePath}"
                 )
+
                 val uploadMimeType = if (isVideo && uploadFile.absolutePath != sourceFile.absolutePath) {
                     "video/mp4"
                 } else if (isVideo) {
@@ -145,9 +187,10 @@ class FileUploadWorker(
                     "failedAt" to null
                 )
                 val docRef = db.collection("uploads").add(docData).await()
-                createdDocIds.add(docRef.id)
+                // Track as pending until confirmed COMPLETED below
+                pendingDocIds.add(docRef.id)
 
-                // ── 4. Upload full media in background ──────────────────────
+                // ── 4. Upload full media ────────────────────────────────────
                 val storagePath = if (isAdmin) {
                     "stations/$stationId/admin_docs/$mediaUUID"
                 } else {
@@ -183,24 +226,75 @@ class FileUploadWorker(
                         "uploadStatus" to "COMPLETED"
                     )
                 ).await()
+
+                // FIX 1: Remove from pending list now that this doc is COMPLETED.
+                // If an exception is thrown by any subsequent file, the failure
+                // handler will not touch this doc.
+                pendingDocIds.remove(docRef.id)
+                Log.i("FileUploadWorker", "File ${index + 1}/$totalFiles completed. Doc ${docRef.id} removed from pending list.")
             }
 
             showCompletionNotification(totalFiles)
             cleanupTempFiles(tempGeneratedFiles.toTypedArray())
             cleanupTempFiles(filePaths)
             Result.success()
+
         } catch (e: Exception) {
             Log.e("FileUploadWorker", "Upload failed: ${e.message}", e)
 
-            // Mark all created docs as FAILED
-            Log.w("FileUploadWorker", "Marking ${createdDocIds.size} docs as FAILED")
-            markDocumentsAsFailed(db, createdDocIds)
+            // FIX 1: Only marks genuinely incomplete docs (completed ones were
+            // already removed from pendingDocIds above).
+            Log.w("FileUploadWorker", "Marking ${pendingDocIds.size} pending docs as FAILED")
+            markDocumentsAsFailed(db, pendingDocIds)
 
             showFailureNotification(e.message ?: "Unknown error")
             cleanupTempFiles(tempGeneratedFiles.toTypedArray())
-            cleanupTempFiles(filePaths)
-            Result.failure()
+
+            // FIX 2: Distinguish transient vs permanent failures.
+            // On transient errors we return Result.retry() and keep the source
+            // files on disk so the next attempt can re-read them.
+            // On permanent errors we clean up and return Result.failure().
+            return if (isTransientError(e) && runAttemptCount < MAX_RETRY_ATTEMPTS) {
+                Log.w(
+                    "FileUploadWorker",
+                    "Transient failure on attempt $runAttemptCount – scheduling retry. error=${e.message}"
+                )
+                // Do NOT delete filePaths here; the retry attempt needs them.
+                Result.retry()
+            } else {
+                Log.e(
+                    "FileUploadWorker",
+                    "Permanent failure or max retries ($MAX_RETRY_ATTEMPTS) reached – giving up."
+                )
+                cleanupTempFiles(filePaths)
+                Result.failure()
+            }
         }
+    }
+
+    // ── FIX 2: Classifies whether an exception is worth retrying ────────────────
+    // Transient = network blips, server overload, temporary Firebase unavailability.
+    // Permanent = auth errors, bad data, permission denied, etc.
+    private fun isTransientError(e: Exception): Boolean = when (e) {
+        is IOException -> {
+            // Covers SocketTimeoutException, UnknownHostException, etc.
+            true
+        }
+        is StorageException -> {
+            // StorageException.ERROR_NOT_AUTHENTICATED is a permanent auth failure.
+            // Everything else (server errors, network timeouts) is considered transient.
+            e.errorCode != StorageException.ERROR_NOT_AUTHENTICATED
+        }
+        is FirebaseFirestoreException -> {
+            when (e.code) {
+                FirebaseFirestoreException.Code.UNAVAILABLE,
+                FirebaseFirestoreException.Code.DEADLINE_EXCEEDED,
+                FirebaseFirestoreException.Code.RESOURCE_EXHAUSTED -> true
+                // PERMISSION_DENIED, NOT_FOUND, INVALID_ARGUMENT, etc. are permanent
+                else -> false
+            }
+        }
+        else -> false
     }
 
     private suspend fun compressVideoIfNeeded(
@@ -244,7 +338,8 @@ class FileUploadWorker(
 
         Log.w(
             "FileUploadWorker",
-            "First compression pass did not reduce size (source=${sourceFile.length()}, compressed=${firstAttempt?.length() ?: -1}). Retrying with VERY_LOW."
+            "First compression pass did not reduce size (source=${sourceFile.length()}, " +
+                "compressed=${firstAttempt?.length() ?: -1}). Retrying with VERY_LOW."
         )
 
         val secondAttempt = compressVideoOnce(
@@ -267,7 +362,9 @@ class FileUploadWorker(
         if (bestCompressed.length() >= sourceFile.length()) {
             Log.w(
                 "FileUploadWorker",
-                "Compression completed but file is not smaller (source=${sourceFile.length()}, best=${bestCompressed.length()}). Uploading compressed anyway for verification."
+                "Compression completed but file is not smaller " +
+                    "(source=${sourceFile.length()}, best=${bestCompressed.length()}). " +
+                    "Uploading compressed anyway for verification."
             )
         }
 
@@ -284,7 +381,8 @@ class FileUploadWorker(
         val expectedOutputFile = File(applicationContext.filesDir, "compressed_uploads/$outputName")
         Log.i(
             "FileUploadWorker",
-            "Compression expected output: ${expectedOutputFile.absolutePath}, exists=${expectedOutputFile.exists()}, size=${expectedOutputFile.length()}"
+            "Compression expected output: ${expectedOutputFile.absolutePath}, " +
+                "exists=${expectedOutputFile.exists()}, size=${expectedOutputFile.length()}"
         )
 
         return suspendCancellableCoroutine { continuation ->
@@ -343,12 +441,17 @@ class FileUploadWorker(
                             return
                         }
                         if (compressedFile.absolutePath == sourceFile.absolutePath) {
-                            Log.w("FileUploadWorker", "Compressed output path is same as source path: ${compressedFile.absolutePath}")
+                            Log.w(
+                                "FileUploadWorker",
+                                "Compressed output path is same as source path: ${compressedFile.absolutePath}"
+                            )
                         }
                         if (compressedFile.length() >= sourceFile.length()) {
                             Log.w(
                                 "FileUploadWorker",
-                                "Compressed file is not smaller (source=${sourceFile.length()}, compressed=${compressedFile.length()}). Uploading compressed anyway for verification."
+                                "Compressed file is not smaller " +
+                                    "(source=${sourceFile.length()}, compressed=${compressedFile.length()}). " +
+                                    "Uploading compressed anyway for verification."
                             )
                         }
                         Log.i(
@@ -404,17 +507,43 @@ class FileUploadWorker(
     }
 
     private suspend fun markDocumentsAsFailed(db: FirebaseFirestore, docIds: List<String>) {
+        // BUG 1 FIX: Retry each doc update up to MAX_MARK_FAILED_ATTEMPTS times.
+        // Previously a single Firestore failure here was silently swallowed, leaving
+        // the doc stuck in UPLOADING. The reconciler is a backstop after 20 minutes,
+        // but retrying immediately closes the gap for transient Firestore errors.
+        val MAX_MARK_FAILED_ATTEMPTS = 3
+
         docIds.forEach { docId ->
-            try {
-                db.collection("uploads").document(docId).update(
-                    mapOf(
-                        "uploadStatus" to "FAILED",
-                        "failedAt" to Timestamp.now()
-                    )
-                ).await()
-                Log.i("FileUploadWorker", "Marked doc $docId as FAILED")
-            } catch (e: Exception) {
-                Log.e("FileUploadWorker", "Failed to mark doc $docId as FAILED: ${e.message}", e)
+            var attempt = 0
+            var marked = false
+            while (attempt < MAX_MARK_FAILED_ATTEMPTS && !marked) {
+                attempt++
+                try {
+                    db.collection("uploads").document(docId).update(
+                        mapOf(
+                            "uploadStatus" to "FAILED",
+                            "failedAt" to Timestamp.now()
+                        )
+                    ).await()
+                    Log.i("FileUploadWorker", "Marked doc $docId as FAILED (attempt $attempt)")
+                    marked = true
+                } catch (e: Exception) {
+                    if (attempt < MAX_MARK_FAILED_ATTEMPTS) {
+                        Log.w(
+                            "FileUploadWorker",
+                            "Attempt $attempt to mark doc $docId as FAILED failed: ${e.message} — retrying"
+                        )
+                    } else {
+                        // All attempts exhausted. The reconcileStaleUploads sweep in the
+                        // repository will catch this doc on the next app launch.
+                        Log.e(
+                            "FileUploadWorker",
+                            "All $MAX_MARK_FAILED_ATTEMPTS attempts to mark doc $docId as FAILED exhausted. " +
+                                "Reconciler will clean it up on next launch. error=${e.message}",
+                            e
+                        )
+                    }
+                }
             }
         }
     }
@@ -453,12 +582,12 @@ class FileUploadWorker(
 
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             ForegroundInfo(
-                NOTIFICATION_ID,
+                notificationId,
                 notification,
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
             )
         } else {
-            ForegroundInfo(NOTIFICATION_ID, notification)
+            ForegroundInfo(notificationId, notification)
         }
     }
 
@@ -470,28 +599,28 @@ class FileUploadWorker(
             .setOngoing(true)
             .setProgress(max, progress, false)
             .build()
-        notificationManager.notify(NOTIFICATION_ID, notification)
+        notificationManager.notify(notificationId, notification)
     }
 
     private fun showCompletionNotification(totalFiles: Int) {
-        notificationManager.cancel(NOTIFICATION_ID)
+        notificationManager.cancel(notificationId)
         val notification = NotificationCompat.Builder(applicationContext, CHANNEL_ID)
             .setContentTitle("Upload Complete")
             .setContentText("$totalFiles file(s) uploaded successfully")
             .setSmallIcon(android.R.drawable.stat_sys_upload_done)
             .setAutoCancel(true)
             .build()
-        notificationManager.notify(NOTIFICATION_ID + 1, notification)
+        notificationManager.notify(notificationId + 1, notification)
     }
 
     private fun showFailureNotification(error: String) {
-        notificationManager.cancel(NOTIFICATION_ID)
+        notificationManager.cancel(notificationId)
         val notification = NotificationCompat.Builder(applicationContext, CHANNEL_ID)
             .setContentTitle("Upload Failed")
             .setContentText(error)
             .setSmallIcon(android.R.drawable.stat_notify_error)
             .setAutoCancel(true)
             .build()
-        notificationManager.notify(NOTIFICATION_ID + 2, notification)
+        notificationManager.notify(notificationId + 2, notification)
     }
 }

@@ -386,7 +386,7 @@ fun StationDetailScreen(
                     confirmButton = {
                         Button(
                             onClick = {
-                                viewModel.deleteFile(fileToDelete!!, stationId, isAdmin)
+                                viewModel.deleteFile(fileToDelete!!, stationId)
                                 fileToDelete = null
                             },
                             colors = ButtonDefaults.buttonColors(

@@ -9,8 +9,6 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
 import com.google.firebase.storage.FirebaseStorage
 import kotlinx.coroutines.tasks.await
-import java.util.Calendar
-import java.util.Date
 import java.util.UUID
 
 class StationRepository {
@@ -81,7 +79,7 @@ class StationRepository {
     }
 
     suspend fun getUploads(stationId: String): List<Upload> {
-        var snapshot = db.collection("uploads")
+        val snapshot = db.collection("uploads")
             .whereEqualTo("stationId", stationId)
             .orderBy("timestamp", Query.Direction.DESCENDING)
             .get()
@@ -122,6 +120,64 @@ class StationRepository {
             db.collection("uploads").document(upload.id).delete().await()
         } else {
             throw Exception("Cannot delete: File ID is missing")
+        }
+    }
+
+    /**
+     * Finds any upload docs belonging to [userId] that have been stuck in UPLOADING
+     * for more than 20 minutes and marks them as FAILED.
+     *
+     * This covers the case where the app process was killed (OEM battery manager,
+     * user swipe, OS reclaim) after the UPLOADING doc was written but before the
+     * worker could set it to COMPLETED, leaving it orphaned forever.
+     *
+     * Call this once on app start from the ViewModel's init block so stale records
+     * are cleaned up the next time the user opens the app.
+     */
+    suspend fun reconcileStaleUploads(userId: String) {
+        val twentyMinutesAgoSeconds = System.currentTimeMillis() / 1000 - (20 * 60)
+        val cutoff = Timestamp(twentyMinutesAgoSeconds, 0)
+
+        try {
+            val staleSnapshot = db.collection("uploads")
+                .whereEqualTo("uploaderId", userId)
+                .whereEqualTo("uploadStatus", "UPLOADING")
+                .whereLessThan("timestamp", cutoff)
+                .get()
+                .await()
+
+            if (staleSnapshot.isEmpty) {
+                Log.d("StationRepo", "reconcileStaleUploads: no stale records found for userId=$userId")
+                return
+            }
+
+            Log.w(
+                "StationRepo",
+                "reconcileStaleUploads: found ${staleSnapshot.size()} stale UPLOADING doc(s) for userId=$userId — marking as FAILED"
+            )
+
+            staleSnapshot.documents.forEach { doc ->
+                try {
+                    doc.reference.update(
+                        mapOf(
+                            "uploadStatus" to "FAILED",
+                            "failedAt" to Timestamp.now()
+                        )
+                    ).await()
+                    Log.i("StationRepo", "reconcileStaleUploads: marked doc ${doc.id} as FAILED")
+                } catch (e: Exception) {
+                    // Log and continue — a failure on one doc should not block the rest
+                    Log.e(
+                        "StationRepo",
+                        "reconcileStaleUploads: failed to update doc ${doc.id}: ${e.message}",
+                        e
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            // Non-fatal — if the query itself fails (e.g. offline), log and move on.
+            // The next app launch will retry.
+            Log.e("StationRepo", "reconcileStaleUploads: query failed: ${e.message}", e)
         }
     }
 }
