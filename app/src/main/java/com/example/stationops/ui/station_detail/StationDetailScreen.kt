@@ -48,7 +48,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -151,6 +150,9 @@ fun StationDetailScreen(
                 notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
             }
         }
+        // Recover any uploads whose WorkManager job was lost by re-enqueuing them from their sidecar
+        // metadata files in filesDir/pending_uploads/
+        viewModel.runStartupRecovery(context)
         viewModel.loadUploads(stationId)
     }
 
@@ -283,7 +285,9 @@ fun StationDetailScreen(
                         }
                     }
                 }
-            } else if (!viewModel.isLoading.value && !viewModel.isUploading.value) {
+            } else if (!viewModel.isLoading.value) {
+                // Empty state — uploads now run in background via WorkManager so there
+                // is no in-memory isUploading state; progress is shown via notification.
                 EmptyStateView(
                     message = if (isAdmin) "No files uploaded for this station yet."
                     else "No uploads found for today.\nTap + to add one."
@@ -299,50 +303,6 @@ fun StationDetailScreen(
                     contentAlignment = Alignment.Center
                 ) {
                     CircularProgressIndicator()
-                }
-            }
-
-            // Upload progress overlay
-            if (viewModel.isUploading.value) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.7f))
-                        .clickable(enabled = false) {},
-                    contentAlignment = Alignment.Center
-                ) {
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(32.dp),
-                        shape = RoundedCornerShape(16.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.surface
-                        )
-                    ) {
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            modifier = Modifier.padding(24.dp)
-                        ) {
-                            Text(
-                                text = viewModel.uploadStatusText.value,
-                                style = MaterialTheme.typography.titleMedium
-                            )
-                            Spacer(modifier = Modifier.height(16.dp))
-                            LinearProgressIndicator(
-                                progress = { viewModel.uploadProgress.value },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(8.dp),
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = "${(viewModel.uploadProgress.value * 100).toInt()}%",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
                 }
             }
 

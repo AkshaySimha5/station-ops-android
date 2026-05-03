@@ -45,7 +45,6 @@ class FileUploadWorker(
         const val KEY_STATION_ID = "station_id"
         const val KEY_USER_ID = "user_id"
         const val KEY_IS_ADMIN = "is_admin"
-        const val MAX_RETRY_ATTEMPTS = 3
     }
 
     // Derive a unique notification ID from the stationId so that concurrent workers
@@ -88,6 +87,15 @@ class FileUploadWorker(
             Log.d("FileUploadWorker", "Auth token refreshed for uid=${currentUser.uid}")
         } catch (e: Exception) {
             Log.e("FileUploadWorker", "Token refresh failed: ${e.message}", e)
+            // FirebaseNetworkException means the refresh request couldn't reach Google's
+            // servers (DNS failure, timeout, connection reset). The token itself is fine —
+            // retrying when the network recovers will succeed. Do NOT delete files.
+            // Any other exception (FirebaseAuthException, invalid credential, etc.) is a
+            // genuine auth problem that retrying won't fix — permanent failure.
+            if (e is com.google.firebase.FirebaseNetworkException) {
+                Log.w("FileUploadWorker", "Token refresh failed due to network — scheduling retry")
+                return Result.retry()
+            }
             showFailureNotification("Authentication expired. Please log in again.")
             cleanupTempFiles(filePaths)
             // Auth failures are permanent – do not retry
@@ -246,26 +254,36 @@ class FileUploadWorker(
             // already removed from pendingDocIds above).
             Log.w("FileUploadWorker", "Marking ${pendingDocIds.size} pending docs as FAILED")
             markDocumentsAsFailed(db, pendingDocIds)
-
-            showFailureNotification(e.message ?: "Unknown error")
             cleanupTempFiles(tempGeneratedFiles.toTypedArray())
 
-            // FIX 2: Distinguish transient vs permanent failures.
-            // On transient errors we return Result.retry() and keep the source
-            // files on disk so the next attempt can re-read them.
-            // On permanent errors we clean up and return Result.failure().
-            return if (isTransientError(e) && runAttemptCount < MAX_RETRY_ATTEMPTS) {
+            // FIX: Transient errors retry indefinitely — no attempt cap.
+            // runAttemptCount increments on every WorkManager restart including those
+            // triggered by network drops, process kills, and constraint changes — not
+            // just application failures. Capping retries meant legitimate uploads were
+            // abandoned after a few network interruptions. WorkManager's exponential
+            // backoff + CONNECTED constraint already provides the right throttling —
+            // the worker only runs when network is available and backs off between
+            // attempts, so unbounded retries are safe.
+            // Permanent errors (auth failure, bad data, missing temp file) still
+            // return Result.failure() immediately and are never retried.
+            return if (isTransientError(e)) {
                 Log.w(
                     "FileUploadWorker",
                     "Transient failure on attempt $runAttemptCount – scheduling retry. error=${e.message}"
                 )
+                // Show a calm informational notification so the user isn't alarmed.
+                // The full technical error is already in logcat via Log.e above.
+                showRetryingNotification()
+
                 // Do NOT delete filePaths here; the retry attempt needs them.
                 Result.retry()
             } else {
                 Log.e(
                     "FileUploadWorker",
-                    "Permanent failure or max retries ($MAX_RETRY_ATTEMPTS) reached – giving up."
+                    "Permanent failure – giving up. error=${e.message}"
                 )
+
+                showFailureNotification("Upload failed. Please try again.")
                 cleanupTempFiles(filePaths)
                 Result.failure()
             }
@@ -275,17 +293,34 @@ class FileUploadWorker(
     // ── FIX 2: Classifies whether an exception is worth retrying ────────────────
     // Transient = network blips, server overload, temporary Firebase unavailability.
     // Permanent = auth errors, bad data, permission denied, etc.
-    private fun isTransientError(e: Exception): Boolean = when (e) {
-        is IOException -> {
-            // Covers SocketTimeoutException, UnknownHostException, etc.
-            true
+        // ── FIX: Classifies whether an exception is worth retrying ────────────────
+    // Transient = network blips, server overload, temporary Firebase unavailability,
+    //             OS foreground service restriction (Android 12+).
+    // Permanent = auth errors, bad data, permission denied, missing temp file, etc.
+    @Suppress("NewApi") // ForegroundServiceStartNotAllowedException is gated by Build.VERSION check
+    private fun isTransientError(e: Exception): Boolean = when {
+        // Android 12+ (API 31): OS rejected startForegroundService() because the app
+        // had no foreground presence (e.g. previous worker just finished and its
+        // foreground service stopped milliseconds before this worker started).
+        // This is temporary — once the user opens the app or enough backoff time
+        // passes with the app visible, the next attempt will succeed.
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            e is android.app.ForegroundServiceStartNotAllowedException -> true
+
+        e is IOException -> {
+            // A missing or zero-byte temp file means the OS evicted it from filesDir
+            // or something else deleted it — it will never come back, so retrying is
+            // pointless and just burns retry attempts on something irrecoverable.
+            val message = e.message ?: ""
+            !message.startsWith("Temp file missing") &&
+                !message.startsWith("Temp file is zero bytes")
         }
-        is StorageException -> {
+        e is StorageException -> {
             // StorageException.ERROR_NOT_AUTHENTICATED is a permanent auth failure.
             // Everything else (server errors, network timeouts) is considered transient.
             e.errorCode != StorageException.ERROR_NOT_AUTHENTICATED
         }
-        is FirebaseFirestoreException -> {
+        e is FirebaseFirestoreException -> {
             when (e.code) {
                 FirebaseFirestoreException.Code.UNAVAILABLE,
                 FirebaseFirestoreException.Code.DEADLINE_EXCEEDED,
@@ -554,6 +589,7 @@ class FileUploadWorker(
         filePaths.forEach { path ->
             try {
                 File(path).delete()
+                File("$path.meta").delete()
             } catch (_: Exception) { }
         }
     }
@@ -598,6 +634,21 @@ class FileUploadWorker(
             .setSmallIcon(android.R.drawable.stat_sys_upload)
             .setOngoing(true)
             .setProgress(max, progress, false)
+            .build()
+        notificationManager.notify(notificationId, notification)
+    }
+
+    private fun showRetryingNotification() {
+        // Shown during transient failures (network blip, foreground service restriction, etc.)
+        // so the user knows something is happening without seeing a scary technical error.
+        // The upload will resume automatically — this notification auto-cancels after a few
+        // seconds and is replaced by the progress notification when the retry starts.
+        val notification = NotificationCompat.Builder(applicationContext, CHANNEL_ID)
+            .setContentTitle("Upload paused")
+            .setContentText("Waiting to reconnect and retry…")
+            .setSmallIcon(android.R.drawable.stat_sys_upload)
+            .setAutoCancel(true)
+            .setTimeoutAfter(10_000) // dismiss after 10s — the retry will post its own notification
             .build()
         notificationManager.notify(notificationId, notification)
     }
