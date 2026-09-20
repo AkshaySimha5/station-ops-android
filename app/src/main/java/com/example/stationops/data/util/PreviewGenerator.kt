@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
 import android.util.Log
+import androidx.core.graphics.scale
 import java.io.File
 import java.io.FileOutputStream
 
@@ -70,7 +71,7 @@ object PreviewGenerator {
         // Fine-scale to exact target width
         val scale = TARGET_WIDTH.toFloat() / sampled.width
         val targetHeight = (sampled.height * scale).toInt()
-        val scaled = Bitmap.createScaledBitmap(sampled, TARGET_WIDTH, targetHeight, true)
+        val scaled = sampled.scale(TARGET_WIDTH, targetHeight, true)
         if (scaled !== sampled) sampled.recycle()
 
         return scaled
@@ -100,7 +101,7 @@ object PreviewGenerator {
         if (bitmap.width <= TARGET_WIDTH) return bitmap
         val scale = TARGET_WIDTH.toFloat() / bitmap.width
         val targetHeight = (bitmap.height * scale).toInt()
-        val scaled = Bitmap.createScaledBitmap(bitmap, TARGET_WIDTH, targetHeight, true)
+        val scaled = bitmap.scale(TARGET_WIDTH, targetHeight, true)
         if (scaled !== bitmap) bitmap.recycle()
         return scaled
     }

@@ -124,15 +124,10 @@ class StationRepository {
     }
 
     /**
-     * Finds any upload docs belonging to [userId] that have been stuck in UPLOADING
-     * for more than 20 minutes and marks them as FAILED.
-     *
-     * This covers the case where the app process was killed (OEM battery manager,
-     * user swipe, OS reclaim) after the UPLOADING doc was written but before the
-     * worker could set it to COMPLETED, leaving it orphaned forever.
-     *
-     * Call this once on app start from the ViewModel's init block so stale records
-     * are cleaned up the next time the user opens the app.
+     * Diagnostic monitor for long-pending uploads belonging to [userId].
+     * Never sets uploadStatus to FAILED; stale records remain in UPLOADING state
+     * so that startup recovery on app launch can re-enqueue background workers
+     * to complete the uploads automatically.
      */
     suspend fun reconcileStaleUploads(userId: String) {
         val twentyMinutesAgoSeconds = System.currentTimeMillis() / 1000 - (20 * 60)
@@ -147,36 +142,15 @@ class StationRepository {
                 .await()
 
             if (staleSnapshot.isEmpty) {
-                Log.d("StationRepo", "reconcileStaleUploads: no stale records found for userId=$userId")
+                Log.d("StationRepo", "reconcileStaleUploads: no pending records older than 20 minutes for userId=$userId")
                 return
             }
 
-            Log.w(
+            Log.i(
                 "StationRepo",
-                "reconcileStaleUploads: found ${staleSnapshot.size()} stale UPLOADING doc(s) for userId=$userId — marking as FAILED"
+                "reconcileStaleUploads: found ${staleSnapshot.size()} in-progress upload(s) for userId=$userId — startup recovery will resume them"
             )
-
-            staleSnapshot.documents.forEach { doc ->
-                try {
-                    doc.reference.update(
-                        mapOf(
-                            "uploadStatus" to "FAILED",
-                            "failedAt" to Timestamp.now()
-                        )
-                    ).await()
-                    Log.i("StationRepo", "reconcileStaleUploads: marked doc ${doc.id} as FAILED")
-                } catch (e: Exception) {
-                    // Log and continue — a failure on one doc should not block the rest
-                    Log.e(
-                        "StationRepo",
-                        "reconcileStaleUploads: failed to update doc ${doc.id}: ${e.message}",
-                        e
-                    )
-                }
-            }
         } catch (e: Exception) {
-            // Non-fatal — if the query itself fails (e.g. offline), log and move on.
-            // The next app launch will retry.
             Log.e("StationRepo", "reconcileStaleUploads: query failed: ${e.message}", e)
         }
     }

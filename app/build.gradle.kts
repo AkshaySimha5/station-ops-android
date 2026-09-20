@@ -1,3 +1,5 @@
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Properties
 
 plugins {
@@ -6,6 +8,9 @@ plugins {
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.google.services)
 }
+
+// ── Auto-generate date-based versionCode (YYMMDDHH) ──
+val autoVersionCode: Int = SimpleDateFormat("yyMMddHH").format(Date()).toInt()
 
 // ── Read local overrides from local.properties (gitignored) ──
 val localProps = Properties()
@@ -42,8 +47,8 @@ android {
         applicationId = localAppId
         minSdk = 24
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = autoVersionCode
+        versionName = "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

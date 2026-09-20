@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import androidx.core.net.toUri
 import android.os.Environment
 import android.webkit.MimeTypeMap
 import android.widget.Toast
@@ -72,6 +73,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import android.os.Build
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import coil.compose.AsyncImage
@@ -236,7 +238,7 @@ fun StationDetailScreen(
             // File list
             if (groupedUploads.isNotEmpty()) {
                 LazyColumn(
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 88.dp)
+                    contentPadding = PaddingValues(bottom = 88.dp)
                 ) {
                     groupedUploads.forEach { (date, uploads) ->
                         stickyHeader {
@@ -286,8 +288,7 @@ fun StationDetailScreen(
                     }
                 }
             } else if (!viewModel.isLoading.value) {
-                // Empty state — uploads now run in background via WorkManager so there
-                // is no in-memory isUploading state; progress is shown via notification.
+                // Empty state — uploads run in background via WorkManager
                 EmptyStateView(
                     message = if (isAdmin) "No files uploaded for this station yet."
                     else "No uploads found for today.\nTap + to add one."
@@ -384,7 +385,7 @@ fun RowScope.FileItemView(
                 } else {
                     try {
                         val intent = Intent(Intent.ACTION_VIEW).apply {
-                            setDataAndType(Uri.parse(file.url), file.type)
+                            setDataAndType(file.url.toUri(), file.type)
                             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                         }
@@ -398,7 +399,6 @@ fun RowScope.FileItemView(
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
-            // Resolve the thumbnail URL: prefer previewUrl, fall back to full url
             val thumbnailUrl = file.previewUrl.ifEmpty { file.url }
             val isImage = file.type.startsWith("image")
             val isVideo = file.type.startsWith("video")
@@ -407,10 +407,8 @@ fun RowScope.FileItemView(
                 isImage -> {
                     AsyncImage(
                         model = if (isAdmin) {
-                            // Admin: never load full media in grid – always preview
                             file.previewUrl.ifEmpty { file.url }
                         } else {
-                            // Employee: use preview for fast load, full on tap is unchanged
                             thumbnailUrl
                         },
                         contentDescription = null,
@@ -419,9 +417,7 @@ fun RowScope.FileItemView(
                     )
                 }
                 isVideo -> {
-                    // Show JPEG preview frame for video (if available), with play overlay
                     if (thumbnailUrl.isNotEmpty() && thumbnailUrl != file.url) {
-                        // We have a real preview thumbnail
                         Box(modifier = Modifier.fillMaxSize()) {
                             AsyncImage(
                                 model = thumbnailUrl,
@@ -429,7 +425,6 @@ fun RowScope.FileItemView(
                                 contentScale = ContentScale.Crop,
                                 modifier = Modifier.fillMaxSize()
                             )
-                            // Play icon overlay
                             Icon(
                                 imageVector = Icons.Default.PlayArrow,
                                 contentDescription = "Video",
@@ -442,7 +437,6 @@ fun RowScope.FileItemView(
                             )
                         }
                     } else {
-                        // Fallback: plain dark background with play icon (existing behavior)
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
@@ -475,7 +469,6 @@ fun RowScope.FileItemView(
             }
 
             if (isAdmin) {
-                // Download button (top-right) – only if upload is complete
                 if (file.uploadStatus == "COMPLETED" && file.url.isNotEmpty()) {
                     IconButton(
                         onClick = { onDownloadClick(file) },
@@ -492,7 +485,6 @@ fun RowScope.FileItemView(
                         )
                     }
                 }
-                // Delete button (bottom-right)
                 IconButton(
                     onClick = { onDeleteClick(file) },
                     modifier = Modifier
@@ -510,7 +502,7 @@ fun RowScope.FileItemView(
                 }
             }
 
-            // Upload-in-progress or failed indicator (shown on both sides)
+            // Upload-in-progress indicator (no FAILED badge)
             if (file.uploadStatus != "COMPLETED") {
                 Box(
                     modifier = Modifier
@@ -520,8 +512,8 @@ fun RowScope.FileItemView(
                         .padding(horizontal = 6.dp, vertical = 2.dp)
                 ) {
                     Text(
-                        text = if (file.uploadStatus == "FAILED") "Failed" else "Uploading…",
-                        color = if (file.uploadStatus == "FAILED") Color(0xFFFF6B6B) else Color.White,
+                        text = "Uploading…",
+                        color = Color.White,
                         style = MaterialTheme.typography.labelSmall
                     )
                 }
@@ -621,7 +613,7 @@ private fun downloadFile(
             val finalFileName = "${safeStationName}_${dateString}.$extension"
             val folderPath = "Work_Photos_Videos/$safeStationName"
 
-            val request = DownloadManager.Request(Uri.parse(url))
+            val request = DownloadManager.Request(url.toUri())
                 .setTitle(finalFileName)
                 .setDescription("Downloading file from Station Ops...")
                 .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
@@ -638,13 +630,11 @@ private fun downloadFile(
         }
     }
 
-    // If the stored mimeType looks like a full MIME (contains '/'), use it.
     if (mimeType.contains("/")) {
         enqueueWithMime(mimeType)
         return
     }
 
-    // Otherwise try to fetch the content type from Firebase Storage metadata.
     try {
         val storage = FirebaseStorage.getInstance()
         val ref = storage.getReferenceFromUrl(url)
@@ -652,11 +642,9 @@ private fun downloadFile(
             val ct = metadata.contentType ?: mimeType
             enqueueWithMime(ct)
         }.addOnFailureListener {
-            // Fallback to the provided mimeType (will likely become .bin)
             enqueueWithMime(mimeType)
         }
     } catch (e: Exception) {
-        // If anything goes wrong, fall back to provided mimeType
         enqueueWithMime(mimeType)
     }
 }

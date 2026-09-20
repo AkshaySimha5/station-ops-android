@@ -8,6 +8,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.example.stationops.data.util.UploadRecoveryManager
 import com.example.stationops.ui.Routes
 import com.example.stationops.ui.dashboard.DashboardScreen
 import com.example.stationops.ui.dashboard.DashboardViewModel
@@ -19,9 +20,19 @@ import com.example.stationops.ui.station_detail.StationDetailScreen
 import com.example.stationops.ui.station_detail.StationDetailViewModel
 import com.example.stationops.ui.theme.StationOpsTheme
 
+/**
+ * Upload Recovery Trigger Site:
+ * Scans and re-enqueues orphaned pending uploads on:
+ * 1. App launch (process creation).
+ * 2. Whenever Firebase auth state transitions from signed-out to signed-in.
+ */
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Initialize session-wide orphaned upload recovery manager
+        UploadRecoveryManager.init(applicationContext)
+
         enableEdgeToEdge()
         setContent {
             StationOpsTheme {
